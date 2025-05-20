@@ -167,7 +167,8 @@ class v8DetectionLoss:
         self.hyp = h
         self.stride = m.stride  # model strides
         self.nc = m.nc  # number of classes
-        self.no = m.nc + m.reg_max * 4
+        # self.no = m.nc + m.reg_max * 4
+        self.no = m.nc + m.reg_max * 4 + 1 #^ ADD OBJ BY ZXC
         self.reg_max = m.reg_max
         self.device = device
 
@@ -205,13 +206,18 @@ class v8DetectionLoss:
 
     def __call__(self, preds, batch):
         """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""
-        loss = torch.zeros(3, device=self.device)  # box, cls, dfl
+        # loss = torch.zeros(3, device=self.device)  # box, cls, dfl
+        loss = torch.zeros(4, device=self.device)  # box, cls, dfl, obj #^ ADD OBJ BY ZXC
         feats = preds[1] if isinstance(preds, tuple) else preds
-        pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
-            (self.reg_max * 4, self.nc), 1
-        )
+        # pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
+        #     (self.reg_max * 4, self.nc), 1
+        # )
+        pred_distri, pred_obj, pred_scores = torch.cat(
+            [xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2
+        ).split((self.reg_max * 4, 1, self.nc), 1) #^ ADD OBJ BY ZXC
 
         pred_scores = pred_scores.permute(0, 2, 1).contiguous()
+        pred_obj    = pred_obj.permute(0, 2, 1).contiguous() #^ ADD OBJ BY ZXC
         pred_distri = pred_distri.permute(0, 2, 1).contiguous()
 
         dtype = pred_scores.dtype
@@ -252,10 +258,16 @@ class v8DetectionLoss:
             loss[0], loss[2] = self.bbox_loss(
                 pred_distri, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask
             )
+        
+        # Obj loss #^ ADD OBJ BY ZXC
+        tobj = fg_mask.float().unsqueeze(-1)
+        lobj = self.bce(pred_obj, tobj.to(dtype)).sum() / target_scores_sum
+        loss[3] = lobj
 
         loss[0] *= self.hyp.box  # box gain
         loss[1] *= self.hyp.cls  # cls gain
         loss[2] *= self.hyp.dfl  # dfl gain
+        loss[3] *= self.hyp.obj  # obj gain #^ ADD OBJ BY ZXC
 
         return loss.sum() * batch_size, loss.detach()  # loss(box, cls, dfl)
 

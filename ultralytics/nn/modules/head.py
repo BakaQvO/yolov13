@@ -173,7 +173,10 @@ class Detect(nn.Module):
                 dimension format [x, y, w, h, max_class_prob, class_index].
         """
         batch_size, anchors, _ = preds.shape  # i.e. shape(16,8400,84)
-        boxes, scores = preds.split([4, nc], dim=-1)
+        # boxes, scores = preds.split([4, nc], dim=-1)
+        boxes = preds[..., :4]
+        obj = preds[..., 4:5]  #^ ADD OBJ BY ZXC
+        scores = preds[..., 5:]
         index = scores.amax(dim=-1).topk(min(max_det, anchors))[1].unsqueeze(-1)
         boxes = boxes.gather(dim=1, index=index.repeat(1, 1, 4))
         scores = scores.gather(dim=1, index=index.repeat(1, 1, nc))

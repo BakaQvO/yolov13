@@ -164,6 +164,7 @@ class v8DetectionLoss:
 
         m = model.model[-1]  # Detect() module
         self.bce = nn.BCEWithLogitsLoss(reduction="none")
+        self.obj_pw = 1.0 #^ ADD OBJ BY ZXC
         self.hyp = h
         self.stride = m.stride  # model strides
         self.nc = m.nc  # number of classes
@@ -245,29 +246,93 @@ class v8DetectionLoss:
             gt_bboxes,
             mask_gt,
         )
+        
+        if not torch.isfinite(target_scores).all(): # 如果 target_scores 中有 NaN 或 Inf
+            bad = torch.isnan(target_scores) | torch.isinf(target_scores)
+            print('发现非有限 target_scores in', bad.nonzero(as_tuple=False))
+            raise ValueError('target_scores 中出现 NaN 或 Inf')
 
-        target_scores_sum = max(target_scores.sum(), 1)
+        
+        
+        if fg_mask is None:
+            fg_mask = torch.zeros(pred_scores.shape[:2], dtype=torch.bool, device=self.device)
+        else:
+            fg_mask = fg_mask.bool()
 
+        # target_scores_sum = max(target_scores.sum(), 1)
+        target_scores_sum = torch.clamp(target_scores.sum(), min=0.5) # avoid divide by zero #^ BY ZXC
+
+        # print(f"[DEBUG] box(pred_bboxes) {pred_bboxes.sum()} cls(pred_scores) {pred_scores.sum()} dfl(pred_distri) {pred_distri.sum()} obj(pred_obj) {pred_obj.sum()}") #! DEBUG
+        
+        
+        
         # Cls loss
         # loss[1] = self.varifocal_loss(pred_scores, target_scores, target_labels) / target_scores_sum  # VFL way
-        loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
+        # print(f"\n[DEBUG] fg_mask.sum(): {fg_mask.sum()}, target_scores_sum: {target_scores_sum} los_obj before: {loss[1]}", end="\t") #! DEBUG
+        #& 使用BCEwithLogitsLoss reduction='none' pos_weight未使用
+        lcls = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
+        #& 只计算正样本 
+        # if fg_mask.sum():
+        #     lcls = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
+        # else:
+        #     lcls = torch.zeros_like(pred_scores.sum(), device=self.device, dtype=dtype)
+        #& obj同款focal loss #! 这样得到的loss过低
+        # lcls = FocalLoss().forward(pred_scores, target_scores.to(dtype), gamma=2.5, alpha=0.35)
+        
+        loss[1] = lcls
+        # print(f"{[l.isnan().item() for l in loss]} cls_loss: {loss[1]}") #! DEBUG
 
         # Bbox loss
+        # print(f"[DEBUG] loss_box&dfl before: {loss[0]} {loss[2]}", end="\t") #! DEBUG
         if fg_mask.sum():
-            target_bboxes /= stride_tensor
+            target_bboxes = target_bboxes / stride_tensor  # convert to original image scale
             loss[0], loss[2] = self.bbox_loss(
                 pred_distri, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask
             )
+        else:
+            loss[0] = torch.zeros_like(pred_bboxes.sum(), device=self.device, dtype=dtype)
+            loss[2] = torch.zeros_like(pred_distri.sum(), device=self.device, dtype=dtype)
+        # print(f"{[l.isnan().item() for l in loss]} box_loss: {loss[0]} dfl_loss: {loss[2]}") #! DEBUG
+        
+        #! DEBUG
+        # print(f"[DEBUG] pred_scores.sigmoid()[fg_mask]: {pred_scores.sigmoid()[fg_mask]}")
+        # print(f"[DEBUG] target_scores[fg_mask]: {target_scores[fg_mask]}")
+        # print(f"[DEBUG] pred_distri.view(-1,4,reg_max).softmax(-1).amax(-1).mean(-1): {pred_distri.view(-1,4,self.reg_max).softmax(-1).amax(-1).mean(-1)}")
+        # print(f"[DEBUG] pred_obj.sigmoid()[fg_mask]: {pred_obj.sigmoid()[fg_mask]}")
         
         # Obj loss #^ ADD OBJ BY ZXC
+        # print(f"[DEBUG] fg_mask.sum(): {fg_mask.sum()}, target_scores_sum: {target_scores_sum}") #! DEBUG
+        pos = fg_mask.sum().float()
+        neg = (~fg_mask).sum().float()
+        # 这里Obj_pw的意义在于 按照正负样本比例来调整正样本的权重 正样本权重为 obj_pw，负样本权重为1
+        obj_pw = self.obj_pw * neg / max(pos, 1)
+        
         tobj = fg_mask.float().unsqueeze(-1)
-        lobj = self.bce(pred_obj, tobj.to(dtype)).sum() / target_scores_sum
+        
+        # bce_obj = nn.BCEWithLogitsLoss(pos_weight=torch.as_tensor([obj_pw], device=self.device)) #^ ADD OBJ BY ZXC
+        # lobj = bce_obj(pred_obj, tobj.to(dtype))
+        
+        #& 替换用focal loss
+        # gamma值代表了对难易样本的关注程度，gamma越大，对比较难的样本关注越多
+        # alpha值代表了正负样本的权重，alpha越大，对正样本的关注越多
+        lobj = FocalLoss().forward(pred_obj, tobj.to(dtype), gamma=2.5, alpha=0.35)
+        
+        # print(f"[DEBUG] lobj: {loss[3]} -> {lobj}    neg{neg} pos{pos} obj_pw{obj_pw}") #! DEBUG
         loss[3] = lobj
-
+        
+        for i, loss_i in enumerate(loss):
+            if loss_i.isnan() or loss_i.isinf():
+                raise ValueError(
+                    f"ERROR ❌ {self.__class__.__name__} loss[{i}] is {loss_i}, likely due to an invalid target. "
+                    f"Check your dataset and targets. Loss: {loss}"
+                )
+        
         loss[0] *= self.hyp.box  # box gain
         loss[1] *= self.hyp.cls  # cls gain
         loss[2] *= self.hyp.dfl  # dfl gain
         loss[3] *= self.hyp.obj  # obj gain #^ ADD OBJ BY ZXC
+        
+        # print(f"[DEBUG] loss after scaling: {loss}") #! DEBUG
 
         return loss.sum() * batch_size, loss.detach()  # loss(box, cls, dfl)
 

@@ -1,3 +1,4 @@
 */__pycache__/
 ./COD/*
+./yolov12/COD/
 *.pt

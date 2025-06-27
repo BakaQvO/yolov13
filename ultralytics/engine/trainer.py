@@ -180,15 +180,22 @@ class BaseTrainer:
                         raise RuntimeError(f"NaN values found in batch[{i}] \t {step_name}")
         for name, param in self.model.named_parameters():
             if param.grad is not None:
+                if torch.isfinite(param).all():
+                    continue
+                else:
+                    print(f"[ERROR] [{step_name}] NaN in {name} param, max before NaN: {param.abs().max().item()}\t location: {torch.where(torch.isnan(param))}")
+                    print(f"[REPAIR] set to 1e-6")
+                    param.data = torch.nan_to_num(param.data, nan=1e-6, posinf=1e-6, neginf=-1e-6)
+                
                 grad_max = param.grad.abs().max().item()
                 grad_mean = param.grad.abs().mean().item()
                 
                 if torch.isnan(param.grad).any():
-                    print(f"[ERROR] NaN in {name} grad, max before NaN: {grad_max}")
+                    print(f"[ERROR] [{step_name}] NaN in {name} grad, max before NaN: {grad_max}")
                     # 打印更多信息
                     print(f"  - param min/max: {param.min().item():.6f}/{param.max().item():.6f}")
                     print(f"  - param has NaN: {torch.isnan(param).any()}")
-                    raise RuntimeError(f"NaN gradients found in {name}")
+                    # raise RuntimeError(f"NaN gradients found in {name}")
 
     def train(self):
         """Allow device='', device=None on Multi-GPU systems to default to device=0."""
@@ -458,11 +465,13 @@ class BaseTrainer:
                     self.tloss = (
                         (self.tloss * i + self.loss_items) / (i + 1) if self.tloss is not None else self.loss_items
                     )
+                
+                self.check_nan(batch, step_name="after_forward") #^! BY ZXC
 
                 # Backward
                 self.scaler.scale(self.loss).backward()
                 
-                # self.check_nan(batch, step_name="after_backward") #^! BY ZXC
+                self.check_nan(batch, step_name="after_backward") #^! BY ZXC
 
                 # Optimize - https://pytorch.org/docs/master/notes/amp_examples.html
                 if ni - last_opt_step >= self.accumulate:

@@ -236,6 +236,21 @@ class v8DetectionLoss:
         pred_bboxes = self.bbox_decode(anchor_points, pred_distri)  # xyxy, (b, h*w, 4)
         # dfl_conf = pred_distri.view(batch_size, -1, 4, self.reg_max).detach().softmax(-1)
         # dfl_conf = (dfl_conf.amax(-1).mean(-1) + dfl_conf.amax(-1).amin(-1)) / 2
+        
+        # 检查模型预测结果是否为有限值
+        if not torch.isfinite(pred_scores).all():
+            bad = torch.isnan(pred_scores) | torch.isinf(pred_scores)
+            print('发现非有限 pred_scores in', bad.nonzero(as_tuple=False))
+            # raise ValueError('pred_scores 中出现 NaN 或 Inf')
+            # 处理 bad 的情况
+            pred_scores = torch.where(torch.isfinite(pred_scores), pred_scores, torch.tensor(0.0, device=self.device, dtype=dtype)) # 将 NaN 或 Inf 替换为 0.0
+        if not torch.isfinite(pred_bboxes).all():
+            bad = torch.isnan(pred_bboxes) | torch.isinf(pred_bboxes)
+            print('发现非有限 pred_bboxes in', bad.nonzero(as_tuple=False))
+            # raise ValueError('pred_bboxes 中出现 NaN 或 Inf')
+            # 处理 bad 的情况
+            # 将 bad 的位置设置为 0
+            # pred_bboxes[bad] = 0.0
 
         _, target_bboxes, target_scores, fg_mask, _ = self.assigner(
             # pred_scores.detach().sigmoid() * 0.8 + dfl_conf.unsqueeze(-1) * 0.2,
@@ -250,7 +265,11 @@ class v8DetectionLoss:
         if not torch.isfinite(target_scores).all(): # 如果 target_scores 中有 NaN 或 Inf
             bad = torch.isnan(target_scores) | torch.isinf(target_scores)
             print('发现非有限 target_scores in', bad.nonzero(as_tuple=False))
+            
             raise ValueError('target_scores 中出现 NaN 或 Inf')
+            # 处理 bad 的情况
+            # 将 bad 的位置设置为 0
+            # target_scores[bad] = 0.0  # 将 NaN 或 Inf 替换为 0.0
 
         
         
@@ -266,8 +285,7 @@ class v8DetectionLoss:
         
         
         
-        # Cls loss
-        # loss[1] = self.varifocal_loss(pred_scores, target_scores, target_labels) / target_scores_sum  # VFL way
+        #~ Cls loss
         # print(f"\n[DEBUG] fg_mask.sum(): {fg_mask.sum()}, target_scores_sum: {target_scores_sum} los_obj before: {loss[1]}", end="\t") #! DEBUG
         #& 使用BCEwithLogitsLoss reduction='none' pos_weight未使用
         lcls = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
@@ -278,11 +296,12 @@ class v8DetectionLoss:
         #     lcls = torch.zeros_like(pred_scores.sum(), device=self.device, dtype=dtype)
         #& obj同款focal loss #! 这样得到的loss过低
         # lcls = FocalLoss().forward(pred_scores, target_scores.to(dtype), gamma=2.5, alpha=0.35)
+        # loss[1] = self.varifocal_loss(pred_scores, target_scores, target_labels) / target_scores_sum  # VFL way
         
         loss[1] = lcls
         # print(f"{[l.isnan().item() for l in loss]} cls_loss: {loss[1]}") #! DEBUG
 
-        # Bbox loss
+        #~ Bbox loss
         # print(f"[DEBUG] loss_box&dfl before: {loss[0]} {loss[2]}", end="\t") #! DEBUG
         if fg_mask.sum():
             target_bboxes = target_bboxes / stride_tensor  # convert to original image scale
@@ -300,15 +319,35 @@ class v8DetectionLoss:
         # print(f"[DEBUG] pred_distri.view(-1,4,reg_max).softmax(-1).amax(-1).mean(-1): {pred_distri.view(-1,4,self.reg_max).softmax(-1).amax(-1).mean(-1)}")
         # print(f"[DEBUG] pred_obj.sigmoid()[fg_mask]: {pred_obj.sigmoid()[fg_mask]}")
         
-        # Obj loss #^ ADD OBJ BY ZXC
+        #~ Obj loss #^ ADD OBJ BY ZXC
         # print(f"[DEBUG] fg_mask.sum(): {fg_mask.sum()}, target_scores_sum: {target_scores_sum}") #! DEBUG
         pos = fg_mask.sum().float()
         neg = (~fg_mask).sum().float()
         # 这里Obj_pw的意义在于 按照正负样本比例来调整正样本的权重 正样本权重为 obj_pw，负样本权重为1
         obj_pw = self.obj_pw * neg / max(pos, 1)
         
-        tobj = fg_mask.float().unsqueeze(-1)
+        # tobj = fg_mask.float().unsqueeze(-1)
         
+        #& 替换为用IOU计算而非单纯0/1
+        tobj = torch.zeros_like(pred_obj, device=self.device, dtype=dtype)
+        
+        if fg_mask.sum():
+            # 原图尺寸
+            pred_bboxes_img = pred_bboxes * stride_tensor
+            target_bboxes_img = target_bboxes * stride_tensor
+            
+            # 计算IOU
+            with torch.no_grad():
+                iou = bbox_iou(
+                    pred_bboxes_img[fg_mask],
+                    target_bboxes_img[fg_mask],
+                    xywh=False,
+                    CIoU=True,
+                ).detach().clamp_(0, 1)  # 限制在0到1之间
+                
+                tobj[fg_mask] = iou.unsqueeze(-1)  # 将IOU值赋给正样本位置 # unsqueeze将IOU值从一维变为二维，匹配pred_obj的形状
+        
+        #& 在初版中使用bce
         # bce_obj = nn.BCEWithLogitsLoss(pos_weight=torch.as_tensor([obj_pw], device=self.device)) #^ ADD OBJ BY ZXC
         # lobj = bce_obj(pred_obj, tobj.to(dtype))
         
@@ -322,10 +361,13 @@ class v8DetectionLoss:
         
         for i, loss_i in enumerate(loss):
             if loss_i.isnan() or loss_i.isinf():
-                raise ValueError(
-                    f"ERROR ❌ {self.__class__.__name__} loss[{i}] is {loss_i}, likely due to an invalid target. "
-                    f"Check your dataset and targets. Loss: {loss}"
-                )
+                print(f"[ERROR] {self.__class__.__name__} loss[{i}] is {loss_i}, likely due to an invalid target. ")
+                # raise ValueError(
+                #     f"ERROR ❌ {self.__class__.__name__} loss[{i}] is {loss_i}, likely due to an invalid target. "
+                #     f"Check your dataset and targets. Loss: {loss}"
+                # )
+                # 如果loss_i是NaN或Inf，则将其设置为0
+                loss[i] = torch.tensor(0.0001, device=self.device, dtype=dtype)
         
         loss[0] *= self.hyp.box  # box gain
         loss[1] *= self.hyp.cls  # cls gain

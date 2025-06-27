@@ -1,0 +1,74 @@
+diff --git a/ultralytics/nn/modules/head.py b/ultralytics/nn/modules/head.py
+index b9d0502..7e2ef35 100644
+--- a/ultralytics/nn/modules/head.py
++++ b/ultralytics/nn/modules/head.py
+@@ -37,9 +37,11 @@ class Detect(nn.Module):
+         self.nc = nc  # number of classes
+         self.nl = len(ch)  # number of detection layers
+         self.reg_max = 16  # DFL channels (ch[0] // 16 to scale 4/8/12/16/20 for n/s/m/l/x)
+-        self.no = nc + self.reg_max * 4  # number of outputs per anchor
++        # self.no = nc + self.reg_max * 4  # number of outputs per anchor
++        self.no = nc + self.reg_max * 4 + 1  # number of outputs per anchor #^ ADD OBJ BY ZXC
+         self.stride = torch.zeros(self.nl)  # strides computed during build
+         c2, c3 = max((16, ch[0] // 4, self.reg_max * 4)), max(ch[0], min(self.nc, 100))  # channels
++        c_obj = max(ch[0] // 4, 64)  # objectness channels  #^ ADD OBJ BY ZXC
+         self.cv2 = nn.ModuleList(
+             nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1)) for x in ch
+         )
+@@ -55,6 +57,10 @@ class Detect(nn.Module):
+                 for x in ch
+             )
+         )
++        self.cv_obj = nn.ModuleList(
++            nn.Sequential(Conv(x, c_obj, 3), Conv(c_obj, c_obj, 3), nn.Conv2d(c_obj, 1, 1)) for x in ch
++        ) #^ ADD OBJ BY ZXC
++        
+         self.dfl = DFL(self.reg_max) if self.reg_max > 1 else nn.Identity()
+ 
+         if self.end2end:
+@@ -67,7 +73,8 @@ class Detect(nn.Module):
+             return self.forward_end2end(x)
+ 
+         for i in range(self.nl):
+-            x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), 1)
++            # x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), 1)
++            x[i] = torch.cat((self.cv2[i](x[i]), self.cv_obj[i](x[i]), self.cv3[i](x[i])), 1) #^ ADD OBJ BY ZXC
+         if self.training:  # Training path
+             return x
+         y = self._inference(x)
+@@ -108,9 +115,11 @@ class Detect(nn.Module):
+ 
+         if self.export and self.format in {"saved_model", "pb", "tflite", "edgetpu", "tfjs"}:  # avoid TF FlexSplitV ops
+             box = x_cat[:, : self.reg_max * 4]
+-            cls = x_cat[:, self.reg_max * 4 :]
++            obj = x_cat[:, self.reg_max * 4 : self.reg_max * 4 + 1] #^ ADD OBJ BY ZXC
++            cls = x_cat[:, self.reg_max * 4 + 1 :]
+         else:
+-            box, cls = x_cat.split((self.reg_max * 4, self.nc), 1)
++            # box, cls = x_cat.split((self.reg_max * 4, self.nc), 1)
++            box, obj, cls = x_cat.split((self.reg_max * 4, 1, self.nc), 1) #^ ADD OBJ BY ZXC
+ 
+         if self.export and self.format in {"tflite", "edgetpu"}:
+             # Precompute normalization factor to increase numerical stability
+@@ -128,7 +137,8 @@ class Detect(nn.Module):
+         else:
+             dbox = self.decode_bboxes(self.dfl(box), self.anchors.unsqueeze(0)) * self.strides
+ 
+-        return torch.cat((dbox, cls.sigmoid()), 1)
++        # return torch.cat((dbox, cls.sigmoid()), 1)
++        return torch.cat((dbox, obj.sigmoid(), cls.sigmoid()), 1)  #^ ADD OBJ BY ZXC
+ 
+     def bias_init(self):
+         """Initialize Detect() biases, WARNING: requires stride availability."""
+@@ -163,7 +173,10 @@ class Detect(nn.Module):
+                 dimension format [x, y, w, h, max_class_prob, class_index].
+         """
+         batch_size, anchors, _ = preds.shape  # i.e. shape(16,8400,84)
+-        boxes, scores = preds.split([4, nc], dim=-1)
++        # boxes, scores = preds.split([4, nc], dim=-1)
++        boxes = preds[..., :4]
++        obj = preds[..., 4:5]  #^ ADD OBJ BY ZXC
++        scores = preds[..., 5:]
+         index = scores.amax(dim=-1).topk(min(max_det, anchors))[1].unsqueeze(-1)
+         boxes = boxes.gather(dim=1, index=index.repeat(1, 1, 4))
+         scores = scores.gather(dim=1, index=index.repeat(1, 1, nc))

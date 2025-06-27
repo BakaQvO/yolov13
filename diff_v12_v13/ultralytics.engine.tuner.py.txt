@@ -1,0 +1,12 @@
+diff --git a/ultralytics/engine/tuner.py b/ultralytics/engine/tuner.py
+index 0df109c..dd86a9a 100644
+--- a/ultralytics/engine/tuner.py
++++ b/ultralytics/engine/tuner.py
+@@ -85,6 +85,7 @@ class Tuner:
+             "box": (1.0, 20.0),  # box loss gain
+             "cls": (0.2, 4.0),  # cls loss gain (scale with pixels)
+             "dfl": (0.4, 6.0),  # dfl loss gain
++            "obj": (0.2, 4.0),  # obj loss gain (scale with pixels) #^ ADD OBJ BY ZXC
+             "hsv_h": (0.0, 0.1),  # image HSV-Hue augmentation (fraction)
+             "hsv_s": (0.0, 0.9),  # image HSV-Saturation augmentation (fraction)
+             "hsv_v": (0.0, 0.9),  # image HSV-Value augmentation (fraction)

@@ -228,11 +228,19 @@ def non_max_suppression(
         return output
 
     bs = prediction.shape[0]  # batch size (BCN, i.e. 1,84,6300)
-    nc = nc or (prediction.shape[1] - 4)  # number of classes
-    nm = prediction.shape[1] - nc - 4  # number of masks
-    mi = 4 + nc  # mask start index
-    xc = prediction[:, 4:mi].amax(1) > conf_thres  # candidates
-
+    # nc = nc or (prediction.shape[1] - 4)  # number of classes
+    # nm = prediction.shape[1] - nc - 4  # number of masks
+    # mi = 4 + nc  # mask start index
+    # xc = prediction[:, 4:mi].amax(1) > conf_thres  # candidates
+    #^ ADD OBJ BY ZXC
+    nc = nc or (prediction.shape[1] - 5)  # number of classes
+    nm = prediction.shape[1] - nc - 5  # number of masks
+    mi = 5 + nc  # mask start index
+    obj_ok = prediction[:, 4] > conf_thres
+    cls_ok = prediction[:, 5:mi].amax(1) > conf_thres
+    xc = obj_ok & cls_ok
+    
+    
     # Settings
     # min_wh = 2  # (pixels) minimum box width and height
     time_limit = 2.0 + max_time_img * bs  # seconds to quit after
@@ -265,11 +273,13 @@ def non_max_suppression(
             continue
 
         # Detections matrix nx6 (xyxy, conf, cls)
-        box, cls, mask = x.split((4, nc, nm), 1)
+        # box, cls, mask = x.split((4, nc, nm), 1)
+        box, obj, cls, mask = x.split((4, 1, nc, nm), 1) #^ ADD OBJ BY ZXC
 
         if multi_label:
             i, j = torch.where(cls > conf_thres)
-            x = torch.cat((box[i], x[i, 4 + j, None], j[:, None].float(), mask[i]), 1)
+            # x = torch.cat((box[i], x[i, 4 + j, None], j[:, None].float(), mask[i]), 1)
+            x = torch.cat((box[i], cls[i,j,None], j[:,None].float(), mask[i]), 1) #^ ADD OBJ BY ZXC
         else:  # best class only
             conf, j = cls.max(1, keepdim=True)
             x = torch.cat((box, conf, j.float(), mask), 1)[conf.view(-1) > conf_thres]

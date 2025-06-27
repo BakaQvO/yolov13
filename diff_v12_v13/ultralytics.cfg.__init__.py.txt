@@ -1,0 +1,12 @@
+diff --git a/ultralytics/cfg/__init__.py b/ultralytics/cfg/__init__.py
+index 8625f7c..7987af2 100644
+--- a/ultralytics/cfg/__init__.py
++++ b/ultralytics/cfg/__init__.py
+@@ -149,6 +149,7 @@ CFG_FLOAT_KEYS = {  # integer or float arguments, i.e. x=2 and x=2.0
+     "box",
+     "cls",
+     "dfl",
++    "obj", #^ ADD OBJ BY ZXC
+     "degrees",
+     "shear",
+     "time",

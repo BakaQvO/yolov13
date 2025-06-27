@@ -1,0 +1,12 @@
+
+path: F:\\TrainingData\\Human\\COD # dataset root dir
+train: 
+  - ./datasets_COD/train_1500.txt
+val: 
+  - ./datasets_COD/val_1500.txt
+
+# Classes
+names:
+  0: enemy
+  1: friendly
+  2: head

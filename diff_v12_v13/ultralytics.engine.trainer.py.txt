@@ -1,0 +1,126 @@
+diff --git a/ultralytics/engine/trainer.py b/ultralytics/engine/trainer.py
+index a373cd8..d010f42 100644
+--- a/ultralytics/engine/trainer.py
++++ b/ultralytics/engine/trainer.py
+@@ -166,6 +166,36 @@ class BaseTrainer:
+         """Run all existing callbacks associated with a particular event."""
+         for callback in self.callbacks.get(event, []):
+             callback(self)
++    
++    def check_nan(self, batch=None, step_name=""): #^! BY ZXC
++        """Check for NaN values in the batch data."""
++        if batch:
++            if isinstance(batch, dict):
++                for k, v in batch.items():
++                    if isinstance(v, torch.Tensor) and torch.isnan(v).any():
++                        raise RuntimeError(f"NaN values found in {k} \t {step_name}")
++            elif isinstance(batch, (list, tuple)):
++                for i, v in enumerate(batch):
++                    if isinstance(v, torch.Tensor) and torch.isnan(v).any():
++                        raise RuntimeError(f"NaN values found in batch[{i}] \t {step_name}")
++        for name, param in self.model.named_parameters():
++            if param.grad is not None:
++                if torch.isfinite(param).all():
++                    continue
++                else:
++                    print(f"[ERROR] [{step_name}] NaN in {name} param, max before NaN: {param.abs().max().item()}\t location: {torch.where(torch.isnan(param))}")
++                    print(f"[REPAIR] set to 1e-6")
++                    param.data = torch.nan_to_num(param.data, nan=1e-6, posinf=1e-6, neginf=-1e-6)
++                
++                grad_max = param.grad.abs().max().item()
++                grad_mean = param.grad.abs().mean().item()
++                
++                if torch.isnan(param.grad).any():
++                    print(f"[ERROR] [{step_name}] NaN in {name} grad, max before NaN: {grad_max}")
++                    # 打印更多信息
++                    print(f"  - param min/max: {param.min().item():.6f}/{param.max().item():.6f}")
++                    print(f"  - param has NaN: {torch.isnan(param).any()}")
++                    # raise RuntimeError(f"NaN gradients found in {name}")
+ 
+     def train(self):
+         """Allow device='', device=None on Multi-GPU systems to default to device=0."""
+@@ -362,6 +392,57 @@ class BaseTrainer:
+             self.tloss = None
+             for i, batch in pbar:
+                 self.run_callbacks("on_train_batch_start")
++                
++                '''
++                {'im_file': ['F:\\TrainingData\\Human\\COD\\datasets_COD\\images\\20240714_141517-979.png'], 'ori_shape': [[640, 640]], 'resized_shape': [[1280, 1280]], 'img': tensor([[[[240, 243, 250,  ..., 103, 105, 105],
++                            [241, 245, 250,  ..., 112, 113, 114],
++                            [243, 246, 252,  ..., 121, 120, 121],
++                            ...,
++                            [242, 246, 249,  ...,  64,  64,  65],
++                            [243, 249, 251,  ...,  67,  66,  67],
++                            [245, 249, 251,  ...,  70,  69,  67]],
++
++                            [[240, 242, 249,  ..., 107, 109, 109],
++                            [240, 243, 248,  ..., 116, 115, 116],
++                            [240, 243, 249,  ..., 124, 121, 120],
++                            ...,
++                            [241, 244, 247,  ...,  70,  71,  73],
++                            [242, 247, 250,  ...,  74,  74,  74],
++                            [245, 248, 250,  ...,  77,  76,  74]],
++
++                            [[227, 231, 239,  ..., 104, 106, 106],
++                            [228, 232, 239,  ..., 112, 111, 112],
++                            [230, 233, 239,  ..., 120, 116, 115],
++                            ...,
++                            [225, 230, 233,  ...,  71,  70,  73],
++                            [226, 233, 236,  ...,  75,  74,  75],
++                            [228, 234, 237,  ...,  78,  77,  75]]]], dtype=torch.uint8), 'cls': tensor([[0.],
++                            [2.]]), 'bboxes': tensor([[0.2798, 0.3427, 0.0937, 0.0933],
++                            [0.2650, 0.3292, 0.0480, 0.0499]]), 'batch_idx': tensor([0., 0.])}
++                '''
++                #! DEBUG
++                # print(batch)
++                if "bboxes" in batch:
++                    bboxes = batch["bboxes"]
++                    if bboxes.size(0) > 0:
++                        # print(f"[DEBUG] Found {len(bboxes)} bounding boxes in {label['im_file']}")
++                        batch_idx = batch["batch_idx"].long()
++                        # 检查 bbox 和 cls 长度是否一致
++                        if bboxes.size(0) != batch["cls"].size(0):
++                            raise ValueError(f"[ERROR] Mismatched bbox and cls lengths in {batch['im_file']}")
++                        # # 检查 bounding boxes area
++                        # areas = bboxes[:, 2] * bboxes[:, 3]
++                        # for k in range(areas.size(0)):
++                        #     h, w = batch["resized_shape"][batch_idx[k]]
++                        #     areas[k] = areas[k] * h * w
++                        # small = areas < 9
++                        # if small.any():
++                        #     # print(f"[ERROR] Zero area bounding boxes found in {batch['im_file']}")
++                        #     keep = ~small
++                        #     batch["bboxes"] = batch["bboxes"][keep]
++                        #     batch["cls"] = batch["cls"][keep]
++                
++                
+                 # Warmup
+                 ni = i + nb * epoch
+                 if ni <= nw:
+@@ -384,9 +465,13 @@ class BaseTrainer:
+                     self.tloss = (
+                         (self.tloss * i + self.loss_items) / (i + 1) if self.tloss is not None else self.loss_items
+                     )
++                
++                self.check_nan(batch, step_name="after_forward") #^! BY ZXC
+ 
+                 # Backward
+                 self.scaler.scale(self.loss).backward()
++                
++                self.check_nan(batch, step_name="after_backward") #^! BY ZXC
+ 
+                 # Optimize - https://pytorch.org/docs/master/notes/amp_examples.html
+                 if ni - last_opt_step >= self.accumulate:
+@@ -407,10 +492,11 @@ class BaseTrainer:
+                 if RANK in {-1, 0}:
+                     loss_length = self.tloss.shape[0] if len(self.tloss.shape) else 1
+                     pbar.set_description(
+-                        ("%11s" * 2 + "%11.4g" * (2 + loss_length))
++                        ("%11s" * 3 + "%11.4g" * (2 + loss_length)) #^ ADD lr BY ZXC
+                         % (
+                             f"{epoch + 1}/{self.epochs}",
+                             f"{self._get_memory():.3g}G",  # (GB) GPU memory util
++                            f"{self.optimizer.param_groups[0]['lr']:.6f}", #^ ADD lr BY ZXC
+                             *(self.tloss if loss_length > 1 else torch.unsqueeze(self.tloss, 0)),  # losses
+                             batch["cls"].shape[0],  # batch size, i.e. 8
+                             batch["img"].shape[-1],  # imgsz, i.e 640

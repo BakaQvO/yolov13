@@ -1,0 +1,13 @@
+diff --git a/ultralytics/utils/checks.py b/ultralytics/utils/checks.py
+index ed4e2c6..b6de75e 100644
+--- a/ultralytics/utils/checks.py
++++ b/ultralytics/utils/checks.py
+@@ -703,7 +703,7 @@ def check_amp(model):
+         from ultralytics import YOLO
+ 
+         # assert amp_allclose(YOLO("yolo11n.pt"), im)
+-        assert amp_allclose(YOLO("yolov13n.pt"), im)
++        assert amp_allclose(YOLO("yolov12n.pt"), im)
+         LOGGER.info(f"{prefix}checks passed ✅")
+     except ConnectionError:
+         LOGGER.warning(

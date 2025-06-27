@@ -124,7 +124,7 @@ class Model(nn.Module, PyTorchModelHubMixin, repo_url="https://github.com/ultral
         self.metrics = None  # validation/training metrics
         self.session = None  # HUB session
         self.task = task  # task type
-        model = str(model).strip()  
+        model = str(model).strip()
 
         # Check if Ultralytics HUB model from https://hub.ultralytics.com
         if self.is_hub_model(model):

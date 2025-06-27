@@ -1,0 +1,79 @@
+diff --git a/ultralytics/utils/metrics.py b/ultralytics/utils/metrics.py
+index a5fbff8..2b5821c 100644
+--- a/ultralytics/utils/metrics.py
++++ b/ultralytics/utils/metrics.py
+@@ -669,16 +669,6 @@ class Metric(SimpleClass):
+         """
+         return self.all_ap[:, 0] if len(self.all_ap) else []
+ 
+-    @property
+-    def ap75(self):
+-        """
+-        Returns the Average Precision (AP) at an IoU threshold of 0.75 for all classes.
+-
+-        Returns:
+-            (np.ndarray, list): Array of shape (nc,) with AP75 values per class, or an empty list if not available.
+-        """
+-        return self.all_ap[:, 5] if len(self.all_ap) else []
+-
+     @property
+     def ap(self):
+         """
+@@ -741,11 +731,11 @@ class Metric(SimpleClass):
+ 
+     def mean_results(self):
+         """Mean of results, return mp, mr, map50, map."""
+-        return [self.mp, self.mr, self.map50, self.map75,self.map]
++        return [self.mp, self.mr, self.map50, self.map]
+ 
+     def class_result(self, i):
+         """Class-aware result, return p[i], r[i], ap50[i], ap[i]."""
+-        return self.p[i], self.r[i], self.ap50[i], self.ap75[i], self.ap[i]
++        return self.p[i], self.r[i], self.ap50[i], self.ap[i]
+ 
+     @property
+     def maps(self):
+@@ -757,7 +747,7 @@ class Metric(SimpleClass):
+ 
+     def fitness(self):
+         """Model fitness as a weighted combination of metrics."""
+-        w = [0.0, 0.0, 0.0, 0.0, 1.0]  # weights for [P, R, mAP@0.5, mAP@0.5:0.95]
++        w = [0.0, 0.0, 0.1, 0.9]  # weights for [P, R, mAP@0.5, mAP@0.5:0.95]
+         return (np.array(self.mean_results()) * w).sum()
+ 
+     def update(self, results):
+@@ -865,7 +855,7 @@ class DetMetrics(SimpleClass):
+     @property
+     def keys(self):
+         """Returns a list of keys for accessing specific metrics."""
+-        return ["metrics/precision(B)", "metrics/recall(B)", "metrics/mAP50(B)", "metrics/mAP75(B)", "metrics/mAP50-95(B)"]
++        return ["metrics/precision(B)", "metrics/recall(B)", "metrics/mAP50(B)", "metrics/mAP50-95(B)"]
+ 
+     def mean_results(self):
+         """Calculate mean of detected objects & return precision, recall, mAP50, and mAP50-95."""
+@@ -991,12 +981,10 @@ class SegmentMetrics(SimpleClass):
+             "metrics/precision(B)",
+             "metrics/recall(B)",
+             "metrics/mAP50(B)",
+-            "metrics/mAP75(B)",
+             "metrics/mAP50-95(B)",
+             "metrics/precision(M)",
+             "metrics/recall(M)",
+             "metrics/mAP50(M)",
+-            "metrics/mAP75(M)",
+             "metrics/mAP50-95(M)",
+         ]
+ 
+@@ -1134,12 +1122,10 @@ class PoseMetrics(SegmentMetrics):
+             "metrics/precision(B)",
+             "metrics/recall(B)",
+             "metrics/mAP50(B)",
+-            "metrics/mAP75(B)",
+             "metrics/mAP50-95(B)",
+             "metrics/precision(P)",
+             "metrics/recall(P)",
+             "metrics/mAP50(P)",
+-            "metrics/mAP75(P)",
+             "metrics/mAP50-95(P)",
+         ]
+ 

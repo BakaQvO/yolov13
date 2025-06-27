@@ -33,6 +33,7 @@
 
 <h2>Table of Contents</h2>
 
+- [Updates](#updates)
 - [Technical Briefing 💡](#technical-briefing-)
 - [Main Results 🏆](#main-results-)
   - [1. MS COCO Benchmark](#1-ms-coco-benchmark)

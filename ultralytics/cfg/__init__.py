@@ -149,6 +149,7 @@ CFG_FLOAT_KEYS = {  # integer or float arguments, i.e. x=2 and x=2.0
     "box",
     "cls",
     "dfl",
+    "obj", #^ ADD OBJ BY ZXC
     "degrees",
     "shear",
     "time",

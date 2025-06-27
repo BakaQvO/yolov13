@@ -1,0 +1,35 @@
+diff --git a/ultralytics/nn/modules/__init__.py b/ultralytics/nn/modules/__init__.py
+index 52f39cb..2a168b3 100644
+--- a/ultralytics/nn/modules/__init__.py
++++ b/ultralytics/nn/modules/__init__.py
+@@ -58,10 +58,6 @@ from .block import (
+     SCDown,
+     TorchVision,
+     A2C2f,
+-    HyperACE,
+-    DownsampleConv,
+-    FullPAD_Tunnel,
+-    DSC3k2
+ )
+ from .conv import (
+     CBAM,
+@@ -69,7 +65,6 @@ from .conv import (
+     Concat,
+     Conv,
+     Conv2,
+-    DSConv,
+     ConvTranspose,
+     DWConv,
+     DWConvTranspose2d,
+@@ -166,10 +161,5 @@ __all__ = (
+     "PSA",
+     "TorchVision",
+     "Index",
+-    "A2C2f",
+-    "HyperACE",
+-    "DownsampleConv",
+-    "FullPAD_Tunnel",
+-    "DSC3k2",
+-    "DSConv"
++    "A2C2f"
+ )

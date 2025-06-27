@@ -1,0 +1,20 @@
+
+path: F:\\TrainingData\\Human\\COD # dataset root dir
+train:
+  - ./datasets_COD/train_1500.txt
+  - ./20250518-PVP/train_20250518-PVP.txt
+  - ./20250523-PVP/train_20250523-PVP.txt
+  # - ./20250518-PVP/train_20250518-PVP_postive.txt
+  # - ./20250523-PVP/train_20250523-PVP_postive.txt
+  - ./20250525-PVP/train_20250525-PVP.txt
+val:
+  - ./datasets_COD/val_1500.txt
+  - ./20250518-PVP/val_20250518-PVP.txt
+  - ./20250523-PVP/val_20250523-PVP.txt
+  - ./20250525-PVP/val_20250525-PVP.txt
+
+# Classes
+names:
+  0: enemy
+  1: friendly
+  2: head

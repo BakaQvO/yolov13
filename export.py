@@ -15,7 +15,7 @@ if __name__ == "__main__":
     
     model.export(
         format="onnx",
-        imgsz = [1280,1280],
+        imgsz = [960,960],
         simplify = True,
         data=r"F:\Project\FPSHelper\yolov58\data\COD.yaml",
         # int8=args.int8,

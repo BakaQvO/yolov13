@@ -1,4 +1,6 @@
 **/__pycache__/
-COD/
-./yolov12/COD/
+COD/*
+Apex/*
+./yolov13/COD/*
+./yolov13/Apex/**
 *.pt

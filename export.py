@@ -17,7 +17,7 @@ if __name__ == "__main__":
         format="onnx",
         imgsz = [960,960],
         simplify = True,
-        data=r"F:\Project\FPSHelper\yolov58\data\COD.yaml",
+        data=r"F:\Project\FPSHelper\yolov13\Datasets-Apex-2025-06-27.yaml",
         # int8=args.int8,
         half=args.half,
     )

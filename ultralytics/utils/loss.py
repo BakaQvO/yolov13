@@ -165,6 +165,7 @@ class v8DetectionLoss:
         m = model.model[-1]  # Detect() module
         self.bce = nn.BCEWithLogitsLoss(reduction="none")
         self.obj_pw = 1.0 #^ ADD OBJ BY ZXC
+        self.cls_pw = 0.5
         self.hyp = h
         self.stride = m.stride  # model strides
         self.nc = m.nc  # number of classes
@@ -178,6 +179,8 @@ class v8DetectionLoss:
         self.assigner = TaskAlignedAssigner(topk=tal_topk, num_classes=self.nc, alpha=0.5, beta=6.0)
         self.bbox_loss = BboxLoss(m.reg_max).to(device)
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
+        
+        self.varifocal_loss = VarifocalLoss()  # Varifocal loss instance
 
     def preprocess(self, targets, batch_size, scale_tensor):
         """Preprocesses the target counts and matches with the input batch size to output a tensor."""
@@ -252,7 +255,7 @@ class v8DetectionLoss:
             # 将 bad 的位置设置为 0
             # pred_bboxes[bad] = 0.0
 
-        _, target_bboxes, target_scores, fg_mask, _ = self.assigner(
+        target_labels, target_bboxes, target_scores, fg_mask, _ = self.assigner(
             # pred_scores.detach().sigmoid() * 0.8 + dfl_conf.unsqueeze(-1) * 0.2,
             pred_scores.detach().sigmoid(),
             (pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
@@ -284,19 +287,26 @@ class v8DetectionLoss:
         # print(f"[DEBUG] box(pred_bboxes) {pred_bboxes.sum()} cls(pred_scores) {pred_scores.sum()} dfl(pred_distri) {pred_distri.sum()} obj(pred_obj) {pred_obj.sum()}") #! DEBUG
         
         
+        pos = fg_mask.sum().float()
+        neg = (~fg_mask).sum().float()
         
         #~ Cls loss
         # print(f"\n[DEBUG] fg_mask.sum(): {fg_mask.sum()}, target_scores_sum: {target_scores_sum} los_obj before: {loss[1]}", end="\t") #! DEBUG
         #& 使用BCEwithLogitsLoss reduction='none' pos_weight未使用
         lcls = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
-        #& 只计算正样本 
+        #& 或者使用BCEwithLogitsLoss 使用加权pos_weight
+        # cls_pw = self.cls_pw * neg / max(pos, 1)
+        # bce_cls = nn.BCEWithLogitsLoss(pos_weight=torch.as_tensor([cls_pw], device=self.device), reduction="mean")
+        # lcls = bce_cls(pred_scores, target_scores.to(dtype))  # BCE with pos_weight
+        #& 只计算正样本
         # if fg_mask.sum():
         #     lcls = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
         # else:
         #     lcls = torch.zeros_like(pred_scores.sum(), device=self.device, dtype=dtype)
         #& obj同款focal loss #! 这样得到的loss过低
         # lcls = FocalLoss().forward(pred_scores, target_scores.to(dtype), gamma=2.5, alpha=0.35)
-        # loss[1] = self.varifocal_loss(pred_scores, target_scores, target_labels) / target_scores_sum  # VFL way
+        #& varifocal loss #! 此方法有严重BUG
+        # lcls = self.varifocal_loss(pred_scores, target_scores, target_labels) / target_scores_sum  # VFL way
         
         loss[1] = lcls
         # print(f"{[l.isnan().item() for l in loss]} cls_loss: {loss[1]}") #! DEBUG
@@ -321,8 +331,6 @@ class v8DetectionLoss:
         
         #~ Obj loss #^ ADD OBJ BY ZXC
         # print(f"[DEBUG] fg_mask.sum(): {fg_mask.sum()}, target_scores_sum: {target_scores_sum}") #! DEBUG
-        pos = fg_mask.sum().float()
-        neg = (~fg_mask).sum().float()
         # 这里Obj_pw的意义在于 按照正负样本比例来调整正样本的权重 正样本权重为 obj_pw，负样本权重为1
         obj_pw = self.obj_pw * neg / max(pos, 1)
         
@@ -343,7 +351,7 @@ class v8DetectionLoss:
                     target_bboxes_img[fg_mask],
                     xywh=False,
                     CIoU=True,
-                ).detach().clamp_(0, 1)  # 限制在0到1之间
+                ).detach().clamp_(0, 1).to(tobj.dtype)
                 
                 tobj[fg_mask] = iou.unsqueeze(-1)  # 将IOU值赋给正样本位置 # unsqueeze将IOU值从一维变为二维，匹配pred_obj的形状
         

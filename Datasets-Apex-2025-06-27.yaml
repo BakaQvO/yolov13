@@ -1,0 +1,10 @@
+
+path: F:\\TrainingData\\Human\\Apex # dataset root dir
+train: [ "20250627-BattleScene/train_20250627-BattleScene.txt" ]
+val: [ "./20250627-BattleScene/val_20250627-BattleScene.txt" ]
+
+# Classes
+names:
+  0: enemy
+  1: friendly
+  2: head

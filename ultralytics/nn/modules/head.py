@@ -37,11 +37,9 @@ class Detect(nn.Module):
         self.nc = nc  # number of classes
         self.nl = len(ch)  # number of detection layers
         self.reg_max = 16  # DFL channels (ch[0] // 16 to scale 4/8/12/16/20 for n/s/m/l/x)
-        # self.no = nc + self.reg_max * 4  # number of outputs per anchor
-        self.no = nc + self.reg_max * 4 + 1  # number of outputs per anchor #^ ADD OBJ BY ZXC
+        self.no = nc + self.reg_max * 4  # number of outputs per anchor
         self.stride = torch.zeros(self.nl)  # strides computed during build
         c2, c3 = max((16, ch[0] // 4, self.reg_max * 4)), max(ch[0], min(self.nc, 100))  # channels
-        c_obj = max(ch[0] // 4, 64)  # objectness channels  #^ ADD OBJ BY ZXC
         self.cv2 = nn.ModuleList(
             nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1)) for x in ch
         )
@@ -57,9 +55,6 @@ class Detect(nn.Module):
                 for x in ch
             )
         )
-        self.cv_obj = nn.ModuleList(
-            nn.Sequential(Conv(x, c_obj, 3), Conv(c_obj, c_obj, 3), nn.Conv2d(c_obj, 1, 1)) for x in ch
-        ) #^ ADD OBJ BY ZXC
         
         self.dfl = DFL(self.reg_max) if self.reg_max > 1 else nn.Identity()
 
@@ -73,8 +68,7 @@ class Detect(nn.Module):
             return self.forward_end2end(x)
 
         for i in range(self.nl):
-            # x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), 1)
-            x[i] = torch.cat((self.cv2[i](x[i]), self.cv_obj[i](x[i]), self.cv3[i](x[i])), 1) #^ ADD OBJ BY ZXC
+            x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), 1)
         if self.training:  # Training path
             return x
         y = self._inference(x)
@@ -115,11 +109,9 @@ class Detect(nn.Module):
 
         if self.export and self.format in {"saved_model", "pb", "tflite", "edgetpu", "tfjs"}:  # avoid TF FlexSplitV ops
             box = x_cat[:, : self.reg_max * 4]
-            obj = x_cat[:, self.reg_max * 4 : self.reg_max * 4 + 1] #^ ADD OBJ BY ZXC
-            cls = x_cat[:, self.reg_max * 4 + 1 :]
+            cls = x_cat[:, self.reg_max * 4:]
         else:
-            # box, cls = x_cat.split((self.reg_max * 4, self.nc), 1)
-            box, obj, cls = x_cat.split((self.reg_max * 4, 1, self.nc), 1) #^ ADD OBJ BY ZXC
+            box, cls = x_cat.split((self.reg_max * 4, self.nc), 1)
 
         if self.export and self.format in {"tflite", "edgetpu"}:
             # Precompute normalization factor to increase numerical stability
@@ -137,8 +129,7 @@ class Detect(nn.Module):
         else:
             dbox = self.decode_bboxes(self.dfl(box), self.anchors.unsqueeze(0)) * self.strides
 
-        # return torch.cat((dbox, cls.sigmoid()), 1)
-        return torch.cat((dbox, obj.sigmoid(), cls.sigmoid()), 1)  #^ ADD OBJ BY ZXC
+        return torch.cat((dbox, cls.sigmoid()), 1)
 
     def bias_init(self):
         """Initialize Detect() biases, WARNING: requires stride availability."""
@@ -176,6 +167,89 @@ class Detect(nn.Module):
         batch_size, anchors, _ = preds.shape  # i.e. shape(16,8400,84)
         # boxes, scores = preds.split([4, nc], dim=-1)
         boxes = preds[..., :4]
+        scores = preds[..., 4:]
+        index = scores.amax(dim=-1).topk(min(max_det, anchors))[1].unsqueeze(-1)
+        boxes = boxes.gather(dim=1, index=index.repeat(1, 1, 4))
+        scores = scores.gather(dim=1, index=index.repeat(1, 1, nc))
+        scores, index = scores.flatten(1).topk(min(max_det, anchors))
+        i = torch.arange(batch_size)[..., None]  # batch indices
+        return torch.cat([boxes[i, index // nc], scores[..., None], (index % nc)[..., None].float()], dim=-1)
+
+class Detect_dflobj(Detect):
+    def __init__(self, nc=80, ch=()):
+        super().__init__(nc, ch)
+        self.no = nc + self.reg_max * 4 + 1
+        c_obj = max(ch[0] // 4, 64)  # objectness channels
+        self.cv_obj = nn.ModuleList(
+            nn.Sequential(Conv(x, c_obj, 3), Conv(c_obj, c_obj, 3), nn.Conv2d(c_obj, 1, 1)) for x in ch
+        )
+
+    def forward(self, x):
+        """Concatenates and returns predicted bounding boxes and class probabilities."""
+        if self.end2end:
+            return self.forward_end2end(x)
+
+        for i in range(self.nl):
+            x[i] = torch.cat((self.cv2[i](x[i]), self.cv_obj[i](x[i]), self.cv3[i](x[i])), 1) #^ ADD OBJ BY ZXC
+        if self.training:  # Training path
+            return x
+        y = self._inference(x)
+        return y if self.export else (y, x)
+
+    def _inference(self, x):
+        """Decode predicted bounding boxes and class probabilities based on multiple-level feature maps."""
+        # Inference path
+        shape = x[0].shape  # BCHW
+        x_cat = torch.cat([xi.view(shape[0], self.no, -1) for xi in x], 2)
+        if self.format != "imx" and (self.dynamic or self.shape != shape):
+            self.anchors, self.strides = (x.transpose(0, 1) for x in make_anchors(x, self.stride, 0.5))
+            self.shape = shape
+
+        if self.export and self.format in {"saved_model", "pb", "tflite", "edgetpu", "tfjs"}:  # avoid TF FlexSplitV ops
+            box = x_cat[:, : self.reg_max * 4]
+            obj = x_cat[:, self.reg_max * 4 : self.reg_max * 4 + 1] #^ ADD OBJ BY ZXC
+            cls = x_cat[:, self.reg_max * 4 + 1 :]
+        else:
+            # box, cls = x_cat.split((self.reg_max * 4, self.nc), 1)
+            box, obj, cls = x_cat.split((self.reg_max * 4, 1, self.nc), 1) #^ ADD OBJ BY ZXC
+
+        if self.export and self.format in {"tflite", "edgetpu"}:
+            # Precompute normalization factor to increase numerical stability
+            # See https://github.com/ultralytics/ultralytics/issues/7371
+            grid_h = shape[2]
+            grid_w = shape[3]
+            grid_size = torch.tensor([grid_w, grid_h, grid_w, grid_h], device=box.device).reshape(1, 4, 1)
+            norm = self.strides / (self.stride[0] * grid_size)
+            dbox = self.decode_bboxes(self.dfl(box) * norm, self.anchors.unsqueeze(0) * norm[:, :2])
+        elif self.export and self.format == "imx":
+            dbox = self.decode_bboxes(
+                self.dfl(box) * self.strides, self.anchors.unsqueeze(0) * self.strides, xywh=False
+            )
+            return dbox.transpose(1, 2), cls.sigmoid().permute(0, 2, 1)
+        else:
+            dbox = self.decode_bboxes(self.dfl(box), self.anchors.unsqueeze(0)) * self.strides
+
+        # return torch.cat((dbox, cls.sigmoid()), 1)
+        return torch.cat((dbox, obj.sigmoid(), cls.sigmoid()), 1)  #^ ADD OBJ BY ZXC
+
+    @staticmethod
+    def postprocess(preds: torch.Tensor, max_det: int, nc: int = 80):
+        """
+        Post-processes YOLO model predictions.
+
+        Args:
+            preds (torch.Tensor): Raw predictions with shape (batch_size, num_anchors, 4 + nc) with last dimension
+                format [x, y, w, h, class_probs].
+            max_det (int): Maximum detections per image.
+            nc (int, optional): Number of classes. Default: 80.
+
+        Returns:
+            (torch.Tensor): Processed predictions with shape (batch_size, min(max_det, num_anchors), 6) and last
+                dimension format [x, y, w, h, max_class_prob, class_index].
+        """
+        batch_size, anchors, _ = preds.shape  # i.e. shape(16,8400,84)
+        # boxes, scores = preds.split([4, nc], dim=-1)
+        boxes = preds[..., :4]
         obj = preds[..., 4:5]  #^ ADD OBJ BY ZXC
         scores = preds[..., 5:]
         index = scores.amax(dim=-1).topk(min(max_det, anchors))[1].unsqueeze(-1)
@@ -184,8 +258,7 @@ class Detect(nn.Module):
         scores, index = scores.flatten(1).topk(min(max_det, anchors))
         i = torch.arange(batch_size)[..., None]  # batch indices
         return torch.cat([boxes[i, index // nc], scores[..., None], (index % nc)[..., None].float()], dim=-1)
-
-
+    
 class Segment(Detect):
     """YOLO Segment head for segmentation models."""
 

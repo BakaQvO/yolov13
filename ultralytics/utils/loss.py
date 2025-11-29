@@ -164,13 +164,11 @@ class v8DetectionLoss:
 
         m = model.model[-1]  # Detect() module
         self.bce = nn.BCEWithLogitsLoss(reduction="none")
-        self.obj_pw = 1.0 #^ ADD OBJ BY ZXC
         self.cls_pw = 0.5
         self.hyp = h
         self.stride = m.stride  # model strides
         self.nc = m.nc  # number of classes
-        # self.no = m.nc + m.reg_max * 4
-        self.no = m.nc + m.reg_max * 4 + 1 #^ ADD OBJ BY ZXC
+        self.no = m.nc + m.reg_max * 4
         self.reg_max = m.reg_max
         self.device = device
 
@@ -207,6 +205,152 @@ class v8DetectionLoss:
             # pred_dist = pred_dist.view(b, a, c // 4, 4).transpose(2,3).softmax(3).matmul(self.proj.type(pred_dist.dtype))
             # pred_dist = (pred_dist.view(b, a, c // 4, 4).softmax(2) * self.proj.type(pred_dist.dtype).view(1, 1, -1, 1)).sum(2)
         return dist2bbox(pred_dist, anchor_points, xywh=False)
+
+    def __call__(self, preds, batch):
+        """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""
+        # loss = torch.zeros(3, device=self.device)  # box, cls, dfl
+        loss = torch.zeros(3, device=self.device)  # box, cls, dfl
+        feats = preds[1] if isinstance(preds, tuple) else preds
+        # pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
+        #     (self.reg_max * 4, self.nc), 1
+        # )
+        pred_distri, pred_scores = torch.cat(
+            [xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2
+        ).split((self.reg_max * 4, self.nc), 1)
+
+        pred_scores = pred_scores.permute(0, 2, 1).contiguous()
+        pred_distri = pred_distri.permute(0, 2, 1).contiguous()
+
+        dtype = pred_scores.dtype
+        batch_size = pred_scores.shape[0]
+        imgsz = torch.tensor(feats[0].shape[2:], device=self.device, dtype=dtype) * self.stride[0]  # image size (h,w)
+        anchor_points, stride_tensor = make_anchors(feats, self.stride, 0.5)
+
+        # Targets
+        targets = torch.cat((batch["batch_idx"].view(-1, 1), batch["cls"].view(-1, 1), batch["bboxes"]), 1)
+        targets = self.preprocess(targets.to(self.device), batch_size, scale_tensor=imgsz[[1, 0, 1, 0]])
+        gt_labels, gt_bboxes = targets.split((1, 4), 2)  # cls, xyxy
+        mask_gt = gt_bboxes.sum(2, keepdim=True).gt_(0.0)
+
+        # Pboxes
+        pred_bboxes = self.bbox_decode(anchor_points, pred_distri)  # xyxy, (b, h*w, 4)
+        # dfl_conf = pred_distri.view(batch_size, -1, 4, self.reg_max).detach().softmax(-1)
+        # dfl_conf = (dfl_conf.amax(-1).mean(-1) + dfl_conf.amax(-1).amin(-1)) / 2
+        
+        # 检查模型预测结果是否为有限值
+        if not torch.isfinite(pred_scores).all():
+            bad = torch.isnan(pred_scores) | torch.isinf(pred_scores)
+            print('发现非有限 pred_scores in', bad.nonzero(as_tuple=False))
+            # raise ValueError('pred_scores 中出现 NaN 或 Inf')
+            # 处理 bad 的情况
+            pred_scores = torch.where(torch.isfinite(pred_scores), pred_scores, torch.tensor(0.0, device=self.device, dtype=dtype)) # 将 NaN 或 Inf 替换为 0.0
+        if not torch.isfinite(pred_bboxes).all():
+            bad = torch.isnan(pred_bboxes) | torch.isinf(pred_bboxes)
+            print('发现非有限 pred_bboxes in', bad.nonzero(as_tuple=False))
+            # raise ValueError('pred_bboxes 中出现 NaN 或 Inf')
+            # 处理 bad 的情况
+            # 将 bad 的位置设置为 0
+            # pred_bboxes[bad] = 0.0
+
+        target_labels, target_bboxes, target_scores, fg_mask, _ = self.assigner(
+            # pred_scores.detach().sigmoid() * 0.8 + dfl_conf.unsqueeze(-1) * 0.2,
+            pred_scores.detach().sigmoid(),
+            (pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
+            anchor_points * stride_tensor,
+            gt_labels,
+            gt_bboxes,
+            mask_gt,
+        )
+        
+        if not torch.isfinite(target_scores).all(): # 如果 target_scores 中有 NaN 或 Inf
+            bad = torch.isnan(target_scores) | torch.isinf(target_scores)
+            print('发现非有限 target_scores in', bad.nonzero(as_tuple=False))
+            
+            raise ValueError('target_scores 中出现 NaN 或 Inf')
+            # 处理 bad 的情况
+            # 将 bad 的位置设置为 0
+            # target_scores[bad] = 0.0  # 将 NaN 或 Inf 替换为 0.0
+
+        
+        
+        if fg_mask is None:
+            fg_mask = torch.zeros(pred_scores.shape[:2], dtype=torch.bool, device=self.device)
+        else:
+            fg_mask = fg_mask.bool()
+
+        # target_scores_sum = max(target_scores.sum(), 1)
+        target_scores_sum = torch.clamp(target_scores.sum(), min=0.5) # avoid divide by zero #^ BY ZXC
+
+        # print(f"[DEBUG] box(pred_bboxes) {pred_bboxes.sum()} cls(pred_scores) {pred_scores.sum()} dfl(pred_distri) {pred_distri.sum()} obj(pred_obj) {pred_obj.sum()}") #! DEBUG
+        
+        
+        pos = fg_mask.sum().float()
+        neg = (~fg_mask).sum().float()
+        
+        #~ Cls loss
+        # print(f"\n[DEBUG] fg_mask.sum(): {fg_mask.sum()}, target_scores_sum: {target_scores_sum} los_obj before: {loss[1]}", end="\t") #! DEBUG
+        #& 使用BCEwithLogitsLoss reduction='none' pos_weight未使用
+        lcls = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
+        #& 或者使用BCEwithLogitsLoss 使用加权pos_weight
+        # cls_pw = self.cls_pw * neg / max(pos, 1)
+        # bce_cls = nn.BCEWithLogitsLoss(pos_weight=torch.as_tensor([cls_pw], device=self.device), reduction="mean")
+        # lcls = bce_cls(pred_scores, target_scores.to(dtype))  # BCE with pos_weight
+        #& 只计算正样本
+        # if fg_mask.sum():
+        #     lcls = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
+        # else:
+        #     lcls = torch.zeros_like(pred_scores.sum(), device=self.device, dtype=dtype)
+        #& obj同款focal loss #! 这样得到的loss过低
+        # lcls = FocalLoss().forward(pred_scores, target_scores.to(dtype), gamma=2.5, alpha=0.35)
+        #& varifocal loss #! 此方法有严重BUG
+        # lcls = self.varifocal_loss(pred_scores, target_scores, target_labels) / target_scores_sum  # VFL way
+        
+        loss[1] = lcls
+        # print(f"{[l.isnan().item() for l in loss]} cls_loss: {loss[1]}") #! DEBUG
+
+        #~ Bbox loss
+        # print(f"[DEBUG] loss_box&dfl before: {loss[0]} {loss[2]}", end="\t") #! DEBUG
+        if fg_mask.sum():
+            target_bboxes = target_bboxes / stride_tensor  # convert to original image scale
+            loss[0], loss[2] = self.bbox_loss(
+                pred_distri, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask
+            )
+        else:
+            loss[0] = torch.zeros_like(pred_bboxes.sum(), device=self.device, dtype=dtype)
+            loss[2] = torch.zeros_like(pred_distri.sum(), device=self.device, dtype=dtype)
+        # print(f"{[l.isnan().item() for l in loss]} box_loss: {loss[0]} dfl_loss: {loss[2]}") #! DEBUG
+        
+        #! DEBUG
+        # print(f"[DEBUG] pred_scores.sigmoid()[fg_mask]: {pred_scores.sigmoid()[fg_mask]}")
+        # print(f"[DEBUG] target_scores[fg_mask]: {target_scores[fg_mask]}")
+        # print(f"[DEBUG] pred_distri.view(-1,4,reg_max).softmax(-1).amax(-1).mean(-1): {pred_distri.view(-1,4,self.reg_max).softmax(-1).amax(-1).mean(-1)}")
+        # print(f"[DEBUG] pred_obj.sigmoid()[fg_mask]: {pred_obj.sigmoid()[fg_mask]}")
+        
+        for i, loss_i in enumerate(loss):
+            if loss_i.isnan() or loss_i.isinf():
+                print(f"[ERROR] {self.__class__.__name__} loss[{i}] is {loss_i}, likely due to an invalid target. ")
+                # raise ValueError(
+                #     f"ERROR ❌ {self.__class__.__name__} loss[{i}] is {loss_i}, likely due to an invalid target. "
+                #     f"Check your dataset and targets. Loss: {loss}"
+                # )
+                # 如果loss_i是NaN或Inf，则将其设置为0
+                loss[i] = torch.tensor(0.0001, device=self.device, dtype=dtype)
+        
+        loss[0] *= self.hyp.box  # box gain
+        loss[1] *= self.hyp.cls  # cls gain
+        loss[2] *= self.hyp.dfl  # dfl gain
+        
+        # print(f"[DEBUG] loss after scaling: {loss}") #! DEBUG
+
+        return loss.sum() * batch_size, loss.detach()  # loss(box, cls, dfl)
+
+
+class v8DFLObjDetectionLoss(v8DetectionLoss):
+    def __init__(self, model, tal_topk=10):  # model must be de-paralleled
+        super().__init__(model, tal_topk)
+        self.obj_pw = 1.0  #^ ADD OBJ BY ZXC
+        m = model.model[-1]  # Detect() module
+        self.no = m.nc + m.reg_max * 4 + 1  #^ ADD OBJ BY ZXC
 
     def __call__(self, preds, batch):
         """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""

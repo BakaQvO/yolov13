@@ -390,7 +390,15 @@ class DetectionModel(BaseModel):
 
     def init_criterion(self):
         """Initialize the loss criterion for the DetectionModel."""
-        return E2EDetectLoss(self) if getattr(self, "end2end", False) else v8DetectionLoss(self)
+        # return E2EDetectLoss(self) if getattr(self, "end2end", False) else v8DetectionLoss(self)
+        if getattr(self, "end2end", False):
+            return E2EDetectLoss(self)
+        elif getattr(self, "dflobj", False): #^ ADD DFLObj BY ZXC
+            from ultralytics.utils.loss import v8DFLObjDetectionLoss
+            return v8DFLObjDetectionLoss(self)
+        else:
+            return v8DetectionLoss(self)
+            
 
 
 class OBBModel(DetectionModel):
